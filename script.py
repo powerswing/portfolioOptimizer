@@ -1,13 +1,14 @@
 # %%
 # TODO: IMPLEMENT SHARPE RATIO
-# TODO: TEST NORMALITY OF STOCK RETURNS
 # https://www.machinelearningplus.com/machine-learning/portfolio-optimization-python-example/
 # https://codingandfun.com/portfolio-optimization-with-python/
 # %%
+from numpy.core.fromnumeric import mean
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import datetime as dt
+from scipy.stats import normaltest
 
 from pandas_datareader import data as pdr
 
@@ -15,7 +16,7 @@ plt.style.use(["seaborn", "fivethirtyeight"])
 
 # %%
 
-face = 100
+capital = 100
 simulationNumber = 10
 history = 300
 timeframe = 30
@@ -23,128 +24,158 @@ stocks = ["DBAN.DE", "ADDYY"]
 date1 = dt.datetime.now()
 date0 = date1 - dt.timedelta(days=history)
 
-weights = np.random.random(len(stocks))
-weights /= np.sum(weights)
-
 # %%
 
 
-def plotSimulation(returnsRealization):
-    plt.plot(returnsRealization, )
-    plt.ylabel("Cumulative Returns")
-    plt.xlabel("Days")
-    plt.title("Monte Carlo Simulation for Stock Returns")
-    plt.show()
-
-
-def monteCarlo(stocks, face, meanReturns, covarianceMatrix, simulationNumber, timeframe):
+class portfolioOptimizer(object):
     """
-    Implements Normal Carlo Simulation using Cholesky Decomposition for covariance matrix. Function returns matrix of simulated returns given by S = M + Z*L where M is matrix of empirical average relative returns, Z is multivariate normal matrix and L is lower triangular matrix of Cholesky decomposition of empirical covariance matrix, and * is the inner product operator
-
-    Parameters
-        stocks : list
-            list of stocks. Its length is used to define the shape of multivariate normal distribution
-        face : int
-            value of investment
-        meanReturns : pd.Series
-            average of relative returns per given stock
-        covarianceMatrix : pd.DataFrame
-            covariance matrix of relative returns for given stocks
-        simulationNumber : int
-            number of simulations to run
-        timeframe : int
-            length of time path of each realization from today
-
-    Returns
-        returnsRealization : np.ndarray
-            matrix of simulations of returns
-
+    #TODO: Add description
     """
-    # a matirx of returns averages
-    meanReturnsRealization = np.full(
-        shape=(timeframe, len(stocks)), fill_value=meanReturns).T
 
-    # zero-matrix updated with random realization after each simulation
-    returnsRealization = np.full(
-        shape=(timeframe, simulationNumber), fill_value=0.0)
+    def __init__(self, stocks, capital, date0, date1, assertNormality=True):
+        self.stocks = stocks
+        self.capital = capital
+        self.date0 = date0
+        self.date1 = date1
+        self.assertNormality = assertNormality
+        self.alpha = 1e-3
+        self.simulationNumber = 1000
+        self.timeframe = 9
+        self.tolerance = 5
+        self.returnsRealizations = np.full(
+            shape=(self.timeframe, self.simulationNumber), fill_value=0.0)
+        self.data = None
+        self.closingPrices = None
+        self.pctReturns = None
+        self.meanReturns = None
+        self.covarianceMatrix = None
+        self.normalityMask = None
+        self.statistic = None
+        self.pvalue = None
+        self.weights = None
+        self.meanReturnsRealizations = None
+        self.L = None
+        self.Z = None
+        self.valueAtRisk = None
+        self.conditionalValueAtRisk = None
+        self.returnsRealizationsLast = None
 
-    # Cholesky decomposition of covariance matrix
-    L = np.linalg.cholesky(covarianceMatrix)
+    def getData(self):
+        """
+        Parces stocks over given period from Yahoo. If assertNormality is True, those stocks that fail null hypothesis of returns normality are removed. Normality test is based D’Agostino and Pearson’s (1973)
 
-    for simulation in range(simulationNumber):
-        Z = np.random.normal(size=(timeframe, len(stocks)))
-        simulationReturns = meanReturnsRealization + np.inner(L, Z)
-        returnsRealization[:, simulation] = np.cumprod(
-            np.inner(weights, simulationReturns.T) + 1) * face
+        Parameters
+            stocks : list
+                list of stocks to be parced
+            date0 : int
+                start day of desired period
+            date1 : int
+                end day of desired period
+            assertNormality : bool
+                whether to trim data of stocks which returns fail normality test
 
-    return returnsRealization
+        Returns
+            closingPrices : pd.DataFrame
+                closing prices of parsed data (NaNs are dropped)
+            pctReturns : pd.Series
+                percent changes of closing prices
+            meanReturns : pd.Series
+                average of percentage returns per given stock
+            covarianceMatrix : pd.DataFrame
+                covariance matrix of percentage returns for given stocks
+        """
+        self.data = pdr.get_data_yahoo(
+            self.stocks, self.date0, self.date1)
+        self.closingPrices = self.data["Close"]
 
+        self.pctReturns = self.closingPrices.pct_change().dropna()
 
-def stockMoments(stocks, date0, date1):
-    """
-    A Yahoo parcer of closing prices of given stocks for given period
+        if self.assertNormality:
+            self.statistic, self.pvalue = normaltest(self.pctReturns)
+            self.normalityMask = self.pvalue < self.alpha
+            self.stocks = [stock for (stock, mask) in zip(
+                self.stocks, self.normalityMask) if not mask]
+            self.closingPrices = self.closingPrices[self.closingPrices.columns[self.normalityMask]]
+            self.pctReturns = self.pctReturns[self.pctReturns.columns[self.normalityMask]]
 
-    Parameters
-        stocks : list
-            list of stocks to be parced
-        date0 : int
-            start day of desired period
-        date1 : int
-            end day of desired period
+        self.meanReturns = self.pctReturns.mean()
+        self.covarianceMatrix = self.pctReturns.cov()
 
-    Returns
-        data : pd.DataFrame
-            closing prices of given stocks for given period
-        meanReturns : pd.Series
-            average of relative returns per given stock
-        covarianceMatrix : pd.DataFrame
-            covariance matrix of relative returns for given stocks
+        return self.closingPrices, self.pctReturns, self.meanReturns, self.covarianceMatrix
 
-    """
-    data = pdr.get_data_yahoo(stocks, date0, date1)
-    data = data["Close"]
+    def monteCarlo(self):
+        """
+        Implements Normal Carlo Simulation using Cholesky Decomposition for covariance matrix. Function returns matrix of simulated returns given by S = M + Z*L where M is matrix of empirical average relative returns, Z is multivariate normal matrix and L is lower triangular matrix of Cholesky decomposition of empirical covariance matrix, and * is the inner product operator
 
-    # we apply log to allow additivity between percent changes
-    logpctReturns = data.pct_change().apply(lambda x: np.log(1+x))
-    meanReturns = logpctReturns.mean()
-    covarianceMatrix = logpctReturns.cov()
+        Parameters
+            stocks : list
+                list of stocks. Its length is used to define the shape of multivariate normal distribution
+            capital : int
+                value of investment
+            meanReturns : pd.Series
+                average of relative returns per given stock
+            covarianceMatrix : pd.DataFrame
+                covariance matrix of relative returns for given stocks
+            simulationNumber : int, default is 1000
+                number of simulations to run
+            timeframe : int, default is 9
+                length of time path of each realization from today
 
-    return data, meanReturns, covarianceMatrix
+        Returns
+            returnsRealizations : np.ndarray
+                matrix of simulations of returns
 
+        """
+        # a matirx of returns averages
+        self.meanReturnsRealizations = np.full(
+            shape=(self.timeframe, len(self.stocks)), fill_value=self.meanReturns).T
 
-def riskMetrics(face, returnsRealization, tolerance=5):
-    """
-    Returns value-at-risk and conditional value-at-risk for given tolerance level at the tail of simulation path
+        # Cholesky decomposition of covariance matrix
+        self.L = np.linalg.cholesky(self.covarianceMatrix)
 
-    Parameters
-        face : int
-            value of investment
-        returnsRealization : np.ndarray
-            matrix of simulations of returns
-        tolerance : float, default : 1 (translates to 99 percentile)
-            tolerance (aka confidence or percentile) level for loss cutoff
+        # random weights
+        self.weights = np.random.random(len(self.stocks))
+        self.weights /= np.sum(self.weights)
 
-    Returns
-        valueAtRisk : float
-            value-at-risk for given confidence level
-        conditionalValueAtRisk : float
-            conditional value-at-risk for given confidence level
-    """
-    returnsRealizationLast = pd.Series(returnsRealization[-1, :])
-    valueAtRisk = np.percentile(returnsRealizationLast, tolerance)
-    conditionalValueAtRisk = returnsRealizationLast[returnsRealizationLast <= valueAtRisk].mean(
-    )
+        for simulation in range(self.simulationNumber):
+            self.Z = np.random.normal(size=(self.timeframe, len(self.stocks)))
+            self.simulationReturns = self.meanReturnsRealizations + \
+                np.inner(self.L, self.Z)
+            self.returnsRealizations[:, simulation] = np.cumprod(
+                np.inner(self.weights, self.simulationReturns.T) + 1) * self.capital
 
-    return face - valueAtRisk, face - conditionalValueAtRisk
+        return self.returnsRealizations
+
+    def riskMetrics(self):
+        """
+        Returns the inverse of value-at-risk and conditional value-at-risk for given tolerance level at the tail of simulation paths. To obtain the risk metrics, the return values are to be subtracted from capital
+
+        Parameters
+            capital : int
+                value of investment
+            returnsRealizations : np.ndarray
+                matrix of simulations of returns
+            tolerance : float, default : 1 (translates to 99 percentile)
+                tolerance (aka confidence or percentile) level for loss cutoff
+
+        Returns
+            valueAtRisk : float
+                value-at-risk for given confidence level
+            conditionalValueAtRisk : float
+                conditional value-at-risk for given confidence level
+        """
+        self.returnsRealizationsLast = pd.Series(
+            self.returnsRealizations[-1, :])
+        self.valueAtRisk = np.percentile(
+            self.returnsRealizationsLast, self.tolerance)
+        self.conditionalValueAtRisk = self.returnsRealizationsLast[self.returnsRealizationsLast <= self.valueAtRisk].mean(
+        )
+
+        return self.capital - self.valueAtRisk, self.capital - self.conditionalValueAtRisk
 
 
 # %%
-_, meanReturns, covarianceMatrix = stockMoments(stocks, date0, date1)
-returnsRealization = monteCarlo(
-    stocks, face, meanReturns, covarianceMatrix, simulationNumber, timeframe)
-plotSimulation(returnsRealization)
-
-# %%
-VaR, cVaR = riskMetrics(face, returnsRealization, 1)
-print(VaR, cVaR)
-# %%
+pO = portfolioOptimizer(stocks, capital, date0, date1)
+closingPrices, pctReturns, meanReturns, covarianceMatrix = pO.getData()
+returnsRealizations = pO.monteCarlo()
+var, cvar = pO.riskMetrics()
