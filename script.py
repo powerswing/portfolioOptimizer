@@ -1,8 +1,4 @@
 # %%
-# TODO: IMPLEMENT SHARPE RATIO
-# https://www.machinelearningplus.com/machine-learning/portfolio-optimization-python-example/
-# https://codingandfun.com/portfolio-optimization-with-python/
-# %%
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -23,7 +19,7 @@ startDate = endDate - dt.timedelta(days=history)
 # %%
 
 
-def getData(stocks, startDate, endDate=dt.datetime.now()):
+def getData(stocks, startDate, endDate=dt.datetime.now(), aggregateBy="D", resample="LV"):
     """
     Parces stocks over given period from Yahoo
 
@@ -34,13 +30,26 @@ def getData(stocks, startDate, endDate=dt.datetime.now()):
             start date of desired period
         endDate : datetime.datetime, default is today
             end date of desired period
+        aggregateBy : str, default is "D"
+            data aggregator, may be either by days ("D"), by months ("M") or by years ("Y"). Data is parced by days, so leaving at default does not aggregate nor resample data
+        resample : str, default is "LV"
+            data resampler, applies only if aggregateBy is either "M" or "Y". Options available are by last value ("LV") or by aggregate mean ("AVG")
 
     Returns
-        data : pd.DataFrame
+        data : pandas.DataFrame
             parsed data
     """
     data = pdr.get_data_yahoo(
         stocks, startDate, endDate)
+
+    if (aggregateBy == "M" or aggregateBy == "Y") and resample == "LV":
+
+        data = data.sort_index().resample(
+            aggregateBy).apply(lambda x: x.iloc[-1, ])
+
+    if (aggregateBy == "M" or aggregateBy == "Y") and resample == "AVG":
+
+        data = data.resample(aggregateBy).mean()
 
     return data
 
@@ -91,21 +100,18 @@ class portfolioOptimizer(object):
                 critical value of chi-squared distribution
 
         Stores
-            closingPrices : pd.DataFrame
+            closingPrices : pandas.DataFrame
                 closing prices of parsed data (NaNs are dropped)
-            pctReturns : pd.Series
+            pctReturns : pandas.Series
                 percent changes of closing prices
-            meanReturns : pd.Series
+            meanReturns : pandas.Series
                 average of percentage returns per given stock
-            covarianceMatrix : pd.DataFrame
+            covarianceMatrix : pandas.DataFrame
                 covariance matrix of percentage returns for given stocks
         """
         self.closingPrices = self.data["Close"]
         self.stocks = self.closingPrices.columns.values
         self.stocksNumber = len(self.stocks)
-        # self.closingPricesM = self.closingPricesD.sort_index().resample(
-        #     "M").apply(lambda x: x.iloc[-1, ])
-        # self.closingPricesM = self.closingPricesD.resample("M").mean()
 
         self.pctReturns = self.closingPrices.pct_change().dropna()
 
@@ -133,7 +139,19 @@ class portfolioOptimizer(object):
             riskfreeRate : float, default is 0
                 Risk-free rate of return used to calculate Sharpe ratio
         Stores
-            #TODO
+            weights : numpy.ndarray
+                generated weights for given stocks. Per each simulation, weights are generated from normal distribution and normalized to sum up to one
+            weightedReturns : numpy.ndarray
+                generated mean returns given simulated weights (weights) and empirical mean returns (meanReturns)
+            weightedVariances : numpy.ndarray
+                generated variance of a portfolio given simulated weights (weights) and empirical covariance matrix (covarianceMatrix) which is a dot product between the two
+            weightedRisks : numpy.ndarray
+                generated standard deviation of a portfolio which is a square root of generated variance (weightedVariance)
+            sharpeRatios : numpy.ndarray
+                calculated Sharpe ratio per simulation and generated weights (weights)
+            bestWeight : numpy.ndarray
+                generated weights corresponding to maximum Sharpe ratio
+
 
 
         """
@@ -171,8 +189,6 @@ class portfolioOptimizer(object):
 
         self.bestWeight = self.weights[np.argmax(self.sharpeRatios[:, 0])]
 
-        #self.bestWeight = self.weights[np.argmax(po.sharpeRatios)]
-
     def simulateReturns(self, timeframe=1):
         """
         Implements Normal Carlo simulation (f.e. Raychaudhuri 2008) using Cholesky Decomposition (f.e. Highham 2009) for covariance matrix. Function returns matrix of simulated returns given by S = M + Z*L where M is matrix of empirical average relative returns, Z is multivariate normal matrix and L is lower triangular matrix of Cholesky decomposition of empirical covariance matrix, and * is the inner product operator
@@ -182,9 +198,9 @@ class portfolioOptimizer(object):
                 list of stocks. Its length is used to define the shape of multivariate normal distribution
             capital : int
                 value of investment
-            meanReturns : pd.Series
+            meanReturns : pandas.Series
                 average of relative returns per given stock
-            covarianceMatrix : pd.DataFrame
+            covarianceMatrix : pandas.DataFrame
                 covariance matrix of relative returns for given stocks
             simulationNumber : int, default is 1000
                 number of simulations to run
@@ -192,7 +208,7 @@ class portfolioOptimizer(object):
                 length of time path of each realization from today
 
         Stores
-            returnsRealizations : np.ndarray
+            returnsRealizations : numpy.ndarray
                 matrix of simulations of returns
 
         """
@@ -202,6 +218,7 @@ class portfolioOptimizer(object):
 
         self.returnsRealizations = np.full(
             shape=(timeframe, self.simulationNumber), fill_value=0.0)
+
         # Cholesky decomposition of covariance matrix
         self.L = np.linalg.cholesky(self.covarianceMatrix)
 
@@ -213,17 +230,17 @@ class portfolioOptimizer(object):
             self.returnsRealizations[:, simulation] = np.cumprod(
                 np.inner(self.bestWeight, self.simulationReturns.T) + 1) * self.capital
 
-    def riskMetrics(self, percentile=5):
+    def riskMetrics(self, quantile=5):
         """
-        Returns the inverse of value-at-risk and conditional value-at-risk for given percentile level at the tail of simulation paths. To obtain the risk metrics, the return values are to be subtracted from capital
+        Returns the inverse of value-at-risk and conditional value-at-risk for given quantile level at the tail of simulation paths. To obtain the risk metrics, the return values are to be subtracted from capital
 
         Parameters
             capital : int
                 value of investment
-            returnsRealizations : np.ndarray
+            returnsRealizations : numpy.ndarray
                 matrix of simulations of returns
-            percentile : float, default is 5 (translates to 95 percentile)
-                percentile (aka confidence or percentile) level for loss cutoff
+            quantile : float, default is 5 (translates to 95 percentile)
+                quantile (aka confidence or quantile) level for loss cutoff
 
         Stores
             valueAtRisk : float
@@ -233,8 +250,8 @@ class portfolioOptimizer(object):
         """
         self.returnsRealizationsLast = pd.Series(
             self.returnsRealizations[-1, :])
-        self.valueAtRisk = np.percentile(
-            self.returnsRealizationsLast, percentile)
+        self.valueAtRisk = np.quantile(
+            self.returnsRealizationsLast, quantile)
         self.conditionalValueAtRisk = self.returnsRealizationsLast[self.returnsRealizationsLast <= self.valueAtRisk].mean(
         )
 
